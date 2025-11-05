@@ -1,4 +1,4 @@
-for pred_len in 96 192 336 720; do
+for pred_len in 96; do
     python -u run.py \
         --task_name finetune \
         --is_training 1 \
@@ -12,15 +12,18 @@ for pred_len in 96 192 336 720; do
         --label_len 48 \
         --pred_len $pred_len \
         --e_layers 2 \
+        --d_layers 4 \
         --enc_in 7 \
         --dec_in 7 \
         --c_out 7 \
         --n_heads 8 \
-        --d_model 8 \
-        --d_ff 32 \
+        --d_model 64 \
+        --cond_dim 64 \
+        --d_ff 256 \
         --patch_len 2 \
         --stride 2 \
-        --dropout 0.4 \
+        --block_size 48 \
+        --dropout 0.1 \
         --head_dropout 0.1 \
         --batch_size 16 \
         --gpu 1 \
@@ -29,6 +32,6 @@ for pred_len in 96 192 336 720; do
         --time_steps 1000 \
         --scheduler cosine \
         --patience 3 \
-        --learning_rate 0.0001 \
+        --learning_rate 0.0006 \
         --pct_start 0.3
 done

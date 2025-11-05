@@ -8,21 +8,23 @@ python -u run.py \
     --features M \
     --input_len 336 \
     --e_layers 2 \
-    --d_layers 1 \
+    --d_layers 4 \
     --enc_in 7 \
     --dec_in 7 \
     --c_out 7 \
     --n_heads 8 \
-    --d_model 8 \
-    --d_ff 32 \
+    --d_model 64 \
+    --cond_dim 64 \
+    --d_ff 256 \
     --patch_len 2 \
     --stride 2 \
     --head_dropout 0.1 \
     --dropout 0.2 \
+    --block_size 4 \
     --time_steps 1000 \
     --scheduler cosine \
     --lr_decay 0.95 \
     --learning_rate 0.0005 \
-    --batch_size 16 \
+    --batch_size 64 \
     --train_epochs 50 \
-    --gpu 0
+    --gpu 3

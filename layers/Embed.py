@@ -296,5 +296,6 @@ class PositionalEncoding(nn.Module):
         :param x: [batch_size * num_features, seq_len, d_model]
         :return: [batch_size * num_features, seq_len, d_model]
         """
-        x = x + self.position_encoding(x)
-        return self.dropout(x)
+        pe = self.position_encoding(x)
+        x = x + pe
+        return self.dropout(x), pe

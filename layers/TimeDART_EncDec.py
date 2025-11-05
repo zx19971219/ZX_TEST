@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils.masking import generate_causal_mask, generate_self_only_mask, generate_partial_mask
+import math
+from utils.masking import generate_causal_mask, generate_self_only_mask, generate_partial_mask, generate_block_mask_encoder, generate_block_mask_tgt, generate_block_mask_src
 
 
 class ChannelIndependence(nn.Module):
@@ -34,11 +35,30 @@ class AddSosTokenAndDropLast(nn.Module):
         """
         sos_token_expanded = self.sos_token.expand(
             x.size(0), -1, -1
-        )  # [batch_size * num_features, 1, d_model]
+        )  # [batch_size * num_features, block_size, d_model]
         x = torch.cat(
             [sos_token_expanded, x], dim=1
-        )  # [batch_size * num_features, seq_len + 1, d_model]
-        x = x[:, :-1, :]  # [batch_size * num_features, seq_len, d_model]
+        )  # [batch_size * num_features, seq_len + block_size, d_model]
+        x = x[:, :-self.sos_token.size(1), :]  # [batch_size * num_features, seq_len, d_model]
+        return x
+
+class AddSosToken(nn.Module):
+    def __init__(self, sos_token: torch.Tensor):
+        super(AddSosToken, self).__init__()
+        assert sos_token.dim() == 3
+        self.sos_token = sos_token
+
+    def forward(self, x):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
+        :return: [batch_size * num_features, seq_len+block_size, d_model]
+        """
+        sos_token_expanded = self.sos_token.expand(
+            x.size(0), -1, -1
+        )  # [batch_size * num_features, block_size, d_model]
+        x = torch.cat(
+            [sos_token_expanded, x], dim=1
+        )  # [batch_size * num_features, seq_len + block_size, d_model]
         return x
 
 
@@ -88,6 +108,7 @@ class CausalTransformer(nn.Module):
         num_heads: int,
         num_layers: int,
         feedforward_dim: int,
+        block_size: int,
         dropout: float,
     ):
         super(CausalTransformer, self).__init__()
@@ -99,11 +120,14 @@ class CausalTransformer(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(d_model)
+        self.block_size = block_size
 
     def forward(self, x, is_mask=True):
         # x: [batch_size * num_features, seq_len, d_model]
         seq_len = x.size(1)
-        mask = generate_causal_mask(seq_len).to(x.device) if is_mask else None
+        mask = generate_block_mask_encoder(
+                b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
+                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size).to(x.device) if is_mask else None
         for layer in self.layers:
             x = layer(x, mask)
 
@@ -115,6 +139,7 @@ class Diffusion(nn.Module):
     def __init__(
         self,
         time_steps: int,
+        block_size: int,
         device: torch.device,
         scheduler: str = "cosine",
     ):
@@ -131,6 +156,20 @@ class Diffusion(nn.Module):
 
         self.alpha = 1 - self.betas
         self.gamma = torch.cumprod(self.alpha, dim=0).to(self.device)
+        self.gamma_prev = torch.cat([torch.tensor([1.0], device=self.device), self.gamma[:-1]])
+        self.block_size = block_size
+        # calculations for posterior q(x_{t-1} | x_t, x_0)
+        self.posterior_variance = (
+            self.betas * (1. - self.gamma_prev) / (1. - self.gamma)
+        )
+        self.posterior_log_variance_clipped = torch.log(self.posterior_variance.clamp(min=1e-20))
+        
+        self.posterior_mean_coef1 = (
+            self.betas * torch.sqrt(self.gamma_prev) / (1.0 - self.gamma)
+        )
+        self.posterior_mean_coef2 = (
+            (1.0 - self.gamma_prev) * torch.sqrt(self.alpha) / (1.0 - self.gamma)
+        )
 
     def _cosine_beta_schedule(self, s=0.008):
         steps = self.time_steps + 1
@@ -145,9 +184,74 @@ class Diffusion(nn.Module):
     def _linear_beta_schedule(self, beta_start=1e-4, beta_end=0.02):
         betas = torch.linspace(beta_start, beta_end, self.time_steps)
         return betas
+    
+    def q_posterior_mean_variance(self, x0, xt, t):
+        """
+        Compute the mean and variance of the diffusion posterior:
+            q(x_{t-1} | x_t, x_0)
+        """
+        assert x0.shape == xt.shape
+        
+        posterior_mean = self.posterior_mean_coef1[t].unsqueeze(-1) * x0 + self.posterior_mean_coef2[t].unsqueeze(-1) * xt
+        posterior_variance = self.posterior_variance[t].unsqueeze(-1)
+        posterior_log_variance_clipped = self.posterior_log_variance_clipped[t].unsqueeze(-1)
+        
+        assert (
+            posterior_mean.shape[0]
+            == posterior_variance.shape[0]
+            == posterior_log_variance_clipped.shape[0]
+            == xt.shape[0]
+        )
+        return posterior_mean, posterior_variance, posterior_log_variance_clipped
+    
+    def p_mean_variance(self, pred_x0, xt, t, clip_denoised=True, denoised_fn=None):
+        """
+        compute the p(x_{t-1} | x_0, x_t, t)
+        """
+        if clip_denoised:
+            pred_x0 = pred_x0.clamp(-1, 1)
+        
+        model_mean, posterior_variance, posterior_log_variance_clipped = self.q_posterior_mean_variance(x0=pred_x0, xt=xt, t=t)
+        
+        return {
+            "mean": model_mean,
+            "variance": posterior_variance,
+            "log_variance": posterior_log_variance_clipped,
+            "pred_x0": pred_x0,
+        }
+    
+    def p_sample(self, pred_x0, xt, t, clip_denoised=True):
+        """
+        pred_x0: [batch_size * num_features, seq_len, patch_len]
+        xt: [batch_size * num_features, seq_len, patch_len]
+        t: [batch_size * num_features, seq_len]
+        
+        """
+        out = self.p_mean_variance(pred_x0, xt, t, clip_denoised=clip_denoised)
+        if (t==0).all():
+            return {"sample": out["mean"], "pred_x0": out["pred_x0"]}
+        
+        noise = torch.randn_like(xt)
+        sample = out["mean"] + torch.exp(0.5 * out["log_variance"]) * noise
+        return {"sample": sample, "pred_x0": out["pred_x0"]}
 
     def sample_time_steps(self, shape):
-        return torch.randint(0, self.time_steps, shape, device=self.device)
+        # return torch.randint(0, self.time_steps, shape, device=self.device)
+        block_size = self.block_size
+        n = shape[-1]
+        num_blocks = n // block_size
+        if n % block_size != 0:
+            raise ValueError(
+            f"Input length {n} is not divisible by block_size {block_size}. "
+            f"Each sample must contain an integer number of blocks."
+        )
+            
+        _eps_b = torch.randint(0, self.time_steps, (shape[0], num_blocks), device=self.device) # [batch_size*feature_num, num_blocks]
+        # expand to token level
+        t = _eps_b
+        if block_size != shape[-1]:
+            t = t.repeat_interleave(block_size, dim=-1) # [batch_size*feature_num, input_len]
+        return t
 
     def noise(self, x, t):
         noise = torch.randn_like(x)
@@ -162,60 +266,149 @@ class Diffusion(nn.Module):
         noisy_x, noise = self.noise(x, t)
         return noisy_x, noise, t
 
+class AdaLN(nn.Module):
+    """
+    Adaptive LayerNorm (AdaLN)
+    """
+    def __init__(self, d_model, cond_dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.linear = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cond_dim, 3 * d_model)  # scale, shift, gate
+        )
+
+    def forward(self, x, cond):
+        # cond: [batch, d_model]
+        scale, shift, gate = self.linear(cond).chunk(3, dim=-1)
+        return self.norm(x) * (1 + scale) + shift, gate
+    
+class TimestepEmbedder(nn.Module):
+  """
+  Embeds scalar timesteps (can be [B, S]) into vector representations [B, S, hidden_size].
+  """
+  def __init__(self, hidden_size, frequency_embedding_size=256):
+    super().__init__()
+    self.mlp = nn.Sequential(
+      nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+      nn.SiLU(),
+      nn.Linear(hidden_size, hidden_size, bias=True))
+    self.frequency_embedding_size = frequency_embedding_size
+
+  @staticmethod
+  def timestep_embedding(t, dim, max_period=10000):
+    """
+        t: [B, S]
+        return: [B, S, dim]
+    """
+    # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+    half = dim // 2
+    freqs = torch.exp(
+      - math.log(max_period)
+      * torch.arange(start=0, end=half).to(t.dtype).to(t.device)
+      / half)
+    args = t[..., None].float() * freqs[None, None, :]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2:
+      embedding = torch.cat(
+        [embedding,
+         torch.zeros_like(embedding[..., :1])], dim=-1)
+    return embedding
+
+  def forward(self, t):
+    t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+    t_emb = self.mlp(t_freq)
+    return t_emb
 
 class TransformerDecoderBlock(nn.Module):
     def __init__(
-        self, d_model: int, num_heads: int, feedforward_dim: int, dropout: float
+        self, d_model: int, cond_dim:int, num_heads: int, feedforward_dim: int, dropout: float
     ):
         super(TransformerDecoderBlock, self).__init__()
 
         self.self_attention = nn.MultiheadAttention(
             embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
         )
-        self.norm1 = nn.LayerNorm(d_model)
+        self.adaln1 = AdaLN(d_model, cond_dim)
         self.encoder_attention = nn.MultiheadAttention(
             embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
         )
-        self.norm2 = nn.LayerNorm(d_model)
+        self.adaln2 = AdaLN(d_model, cond_dim)
         self.ff = nn.Sequential(
             nn.Linear(d_model, feedforward_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(feedforward_dim, d_model),
         )
-        self.norm3 = nn.LayerNorm(d_model)
+        self.adaln3 = AdaLN(d_model, cond_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, query, key, value, tgt_mask, src_mask):
+    def forward(self, query, key, value, cond, tgt_mask, src_mask):
         """
         :param query: [batch_size * num_features, seq_len, d_model]
         :param key: [batch_size * num_features, seq_len, d_model]
         :param value: [batch_size * num_features, seq_len, d_model]
+        :param cond: [batch_size * num_features, seq_len, cond_dim]
         :param mask: [1, 1, seq_len, seq_len]
         :return: [batch_size * num_features, seq_len, d_model]
         """
         # Self-attention
+        query_skip = query
+        query, gate1 = self.adaln1(query, cond)
         attn_output, _ = self.self_attention(query, query, query, attn_mask=tgt_mask)
-        query = self.norm1(query + self.dropout(attn_output))
+        query = query_skip + self.dropout(attn_output) * gate1
 
         # Encoder attention
+        query_skip = query
+        query, gate2 = self.adaln2(query, cond)
         attn_output, _ = self.encoder_attention(query, key, value, attn_mask=src_mask)
-        query = self.norm2(query + self.dropout(attn_output))
+        query = query_skip + self.dropout(attn_output) * gate2
 
         # Feed-forward network
+        query_skip = query
+        query, gate3 = self.adaln3(query, cond)
         ff_output = self.ff(query)
-        x = self.norm3(query + self.dropout(ff_output))
+        query = query_skip + self.dropout(ff_output) * gate3
 
-        return x
+        return query
 
+class FinalLayer(nn.Module):
+  def __init__(self, d_model, out_channels, cond_dim):
+    super().__init__()
+    self.linear = nn.Linear(d_model, out_channels)
+    self.linear.weight.data.zero_()
+    self.linear.bias.data.zero_()
+    self.adaln = AdaLN(d_model, cond_dim)
+
+  def forward(self, x, cond):
+    x, _ = self.adaln(x, cond)
+    x = self.linear(x)
+    return x
+
+class ContextLayer(nn.Module):
+  def __init__(self, context_len, seq_len):
+    super().__init__()
+    self.head = nn.Linear(context_len, seq_len)
+
+  def forward(self, x):
+    # x: [B, context_len, d_model]
+    x = x.permute(0, 2, 1) # [B, d_model, context_len]
+    x = self.head(x) # [B, d_model, seq_len]
+    x = x.permute(0, 2, 1) # [B, seq_len, d_model]
+    return x
 
 class DenoisingPatchDecoder(nn.Module):
     def __init__(
         self,
         d_model: int,
+        cond_dim: int,
         num_heads: int,
         num_layers: int,
         feedforward_dim: int,
+        block_size: int,
+        out_channels: int,
+        context_len: int,
+        model_length: int,
         dropout: float,
         mask_ratio: float,
     ):
@@ -223,24 +416,36 @@ class DenoisingPatchDecoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                TransformerDecoderBlock(d_model, num_heads, feedforward_dim, dropout)
+                TransformerDecoderBlock(d_model, cond_dim, num_heads, feedforward_dim, dropout)
                 for _ in range(num_layers)
             ]
         )
-        self.norm = nn.LayerNorm(d_model)
         self.mask_ratio = mask_ratio
+        self.block_size = block_size
+        self.t_map = TimestepEmbedder(cond_dim)
+        self.context_layer = ContextLayer(context_len, model_length)
+        self.final_layer = FinalLayer(d_model, out_channels, cond_dim)
 
-    def forward(self, query, key, value, is_tgt_mask=True, is_src_mask=True):
+    def forward(self, query, key, value, t, is_tgt_mask=True, is_src_mask=True, sample_mode=False):
         seq_len = query.size(1)
+        cond = F.silu(self.t_map(t)) # [B, S] -> [B, S, cond_dim]
+        if sample_mode:
+            context = F.silu(self.context_layer(value))
+            cond = cond + context
+        
         tgt_mask = (
-            generate_partial_mask(seq_len, self.mask_ratio).to(query.device) if is_tgt_mask else None
+            generate_block_mask_tgt(
+                b=None, h=None, q_idx=torch.arange(query.size(1))[:, None], 
+                kv_idx=torch.arange(query.size(1))[None, :], block_size=self.block_size).to(query.device) if is_tgt_mask else None
         )
         src_mask = (
-            generate_partial_mask(seq_len, self.mask_ratio).to(query.device) if is_src_mask else None
+            generate_block_mask_src(
+                b=None, h=None, q_idx=torch.arange(query.size(1))[:, None], 
+                kv_idx=torch.arange(query.size(1))[None, :], block_size=self.block_size).to(query.device) if is_src_mask else None
         )
         for layer in self.layers:
-            query = layer(query, key, value, tgt_mask, src_mask)
-        x = self.norm(query)
+            query = layer(query, key, value, cond, tgt_mask, src_mask)
+        x = self.final_layer(query, cond)
         return x
 
 

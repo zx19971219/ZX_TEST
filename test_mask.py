@@ -1,15 +1,10 @@
-from utils.masking import generate_partial_mask, generate_causal_mask, generate_self_only_mask
+from utils.masking import generate_partial_mask, generate_causal_mask, generate_self_only_mask, generate_block_mask_encoder, generate_block_mask_src, generate_block_mask_tgt
+import torch
 
-# Causal mask (mask_ratio = 0)
-mask = generate_partial_mask(4, 0.0)
-causal_mask = generate_causal_mask(4)
-print(causal_mask)
+seq_len = 8
+block_size = 2
 
-# Self-only mask (mask_ratio = 1)
-mask = generate_partial_mask(4, 1.0)
-self_only_mask = generate_self_only_mask(4)
-print(self_only_mask)
-
-# Partial mask (e.g., mask_ratio = 0.5)
-mask = generate_partial_mask(4, 0.5)
-print(mask)
+mask = generate_block_mask_src(
+                b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
+                kv_idx=torch.arange(seq_len)[None, :], block_size=block_size)
+print(~mask)
