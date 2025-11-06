@@ -98,6 +98,8 @@ class Model(nn.Module):
         elif self.task_name == "finetune":
             self.seq_len = int((self.pred_len - self.patch_len) / self.stride) + 1
             
+            self.context_layer = nn.Linear(self.d_model, self.cond_dim)
+            
             self.head = FlattenHead(
                 seq_len=self.seq_len,
                 d_model=args.patch_len,
@@ -138,8 +140,6 @@ class Model(nn.Module):
             feedforward_dim=args.d_ff,
             block_size=self.block_size,
             out_channels=args.patch_len,
-            context_len=self.context_len,
-            model_length=self.seq_len,
             dropout=args.dropout,
             mask_ratio=args.mask_ratio,
         )
@@ -215,8 +215,9 @@ class Model(nn.Module):
     def sample(self, window_embedding, xt, context_len=None):
         # window_embedding: [batch_size * num_features, block_size, d_model]
         # xt: [batch_size * num_features, block_size, patch_len]
-        num_steps = 100
+        num_steps = 10
         timesteps = torch.linspace(self.time_steps - 1, 0, num_steps, dtype=torch.long).to(xt.device)
+        
         for timestep in timesteps:
             xt_embedding = self.enc_embedding(xt)  # [batch_size * num_features, block_size, d_model]
             
@@ -266,7 +267,7 @@ class Model(nn.Module):
             )  # [batch_size * num_features, seq_len, d_model]
             
             query = torch.randn(context.shape[0], self.block_size, self.patch_len, device=context.device)
-            query = self.sample(context_embedding[:, -self.block_size:, :], query)
+            query = self.sample(context_embedding[:, -self.block_size:, :], query, context_len=context.shape[1])
             context = torch.cat([context, query], dim=1)
 
         x = context[:, -self.seq_len:, :] # [batch_size * num_features, seq_len, patch_len]

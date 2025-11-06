@@ -366,18 +366,6 @@ class FinalLayer(nn.Module):
     x = self.linear(x)
     return x
 
-class ContextLayer(nn.Module):
-  def __init__(self, context_len, seq_len):
-    super().__init__()
-    self.head = nn.Linear(context_len, seq_len)
-
-  def forward(self, x):
-    # x: [B, context_len, d_model]
-    x = x.permute(0, 2, 1) # [B, d_model, context_len]
-    x = self.head(x) # [B, d_model, seq_len]
-    x = x.permute(0, 2, 1) # [B, seq_len, d_model]
-    return x
-
 class DenoisingPatchDecoder(nn.Module):
     def __init__(
         self,
@@ -388,8 +376,6 @@ class DenoisingPatchDecoder(nn.Module):
         feedforward_dim: int,
         block_size: int,
         out_channels: int,
-        context_len: int,
-        model_length: int,
         dropout: float,
         mask_ratio: float,
     ):
@@ -404,12 +390,13 @@ class DenoisingPatchDecoder(nn.Module):
         self.mask_ratio = mask_ratio
         self.block_size = block_size
         self.t_map = TimestepEmbedder(cond_dim)
-        self.context_layer = ContextLayer(context_len, model_length)
         self.final_layer = FinalLayer(d_model, out_channels, cond_dim)
 
-    def forward(self, query, key, value, t, is_tgt_mask=True, is_src_mask=True):
+    def forward(self, query, key, value, t, is_tgt_mask=True, is_src_mask=True, context_cond=None):
         seq_len = query.size(1)
         cond = F.silu(self.t_map(t)) # [B, S] -> [B, S, cond_dim]
+        if context_cond is not None:
+            cond = cond + context_cond
         
         tgt_mask = (
             generate_block_mask_decoder(
@@ -423,6 +410,7 @@ class DenoisingPatchDecoder(nn.Module):
         )
         for layer in self.layers:
             query = layer(query, key, value, cond, tgt_mask, src_mask)
+            
         x = self.final_layer(query, cond)
         return x
 

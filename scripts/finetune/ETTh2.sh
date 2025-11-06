@@ -11,7 +11,7 @@ for pred_len in 96; do
         --input_len 336 \
         --label_len 48 \
         --pred_len $pred_len \
-        --e_layers 2 \
+        --e_layers 4 \
         --d_layers 4 \
         --enc_in 7 \
         --dec_in 7 \
@@ -22,7 +22,7 @@ for pred_len in 96; do
         --d_ff 256 \
         --patch_len 2 \
         --stride 2 \
-        --block_size 48 \
+        --block_num 1 \
         --dropout 0.1 \
         --head_dropout 0.1 \
         --batch_size 16 \
