@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from utils.masking import generate_causal_mask, generate_self_only_mask, generate_partial_mask, generate_block_mask_encoder, generate_block_mask_tgt, generate_block_mask_src
+from utils.masking import generate_causal_mask, generate_self_only_mask, generate_partial_mask, generate_block_mask_encoder, generate_block_mask_decoder
 
 
 class ChannelIndependence(nn.Module):
@@ -40,25 +40,6 @@ class AddSosTokenAndDropLast(nn.Module):
             [sos_token_expanded, x], dim=1
         )  # [batch_size * num_features, seq_len + block_size, d_model]
         x = x[:, :-self.sos_token.size(1), :]  # [batch_size * num_features, seq_len, d_model]
-        return x
-
-class AddSosToken(nn.Module):
-    def __init__(self, sos_token: torch.Tensor):
-        super(AddSosToken, self).__init__()
-        assert sos_token.dim() == 3
-        self.sos_token = sos_token
-
-    def forward(self, x):
-        """
-        :param x: [batch_size * num_features, seq_len, d_model]
-        :return: [batch_size * num_features, seq_len+block_size, d_model]
-        """
-        sos_token_expanded = self.sos_token.expand(
-            x.size(0), -1, -1
-        )  # [batch_size * num_features, block_size, d_model]
-        x = torch.cat(
-            [sos_token_expanded, x], dim=1
-        )  # [batch_size * num_features, seq_len + block_size, d_model]
         return x
 
 
@@ -426,20 +407,17 @@ class DenoisingPatchDecoder(nn.Module):
         self.context_layer = ContextLayer(context_len, model_length)
         self.final_layer = FinalLayer(d_model, out_channels, cond_dim)
 
-    def forward(self, query, key, value, t, is_tgt_mask=True, is_src_mask=True, sample_mode=False):
+    def forward(self, query, key, value, t, is_tgt_mask=True, is_src_mask=True):
         seq_len = query.size(1)
         cond = F.silu(self.t_map(t)) # [B, S] -> [B, S, cond_dim]
-        if sample_mode:
-            context = F.silu(self.context_layer(value))
-            cond = cond + context
         
         tgt_mask = (
-            generate_block_mask_tgt(
+            generate_block_mask_decoder(
                 b=None, h=None, q_idx=torch.arange(query.size(1))[:, None], 
                 kv_idx=torch.arange(query.size(1))[None, :], block_size=self.block_size).to(query.device) if is_tgt_mask else None
         )
         src_mask = (
-            generate_block_mask_src(
+            generate_block_mask_decoder(
                 b=None, h=None, q_idx=torch.arange(query.size(1))[:, None], 
                 kv_idx=torch.arange(query.size(1))[None, :], block_size=self.block_size).to(query.device) if is_src_mask else None
         )

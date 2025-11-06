@@ -20,7 +20,7 @@ python -u run.py \
     --stride 2 \
     --head_dropout 0.1 \
     --dropout 0.2 \
-    --block_size 4 \
+    --block_num 64 \
     --time_steps 1000 \
     --scheduler cosine \
     --lr_decay 0.95 \

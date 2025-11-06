@@ -197,7 +197,7 @@ parser.add_argument(
     "--time_steps", type=int, default=1000, help="time steps in diffusion"
 )
 parser.add_argument(
-    "--block_size", type=int, default=4, help="block size in diffusion"
+    "--block_num", type=int, default=1, help="block number in diffusion"
 )
 parser.add_argument(
     "--scheduler", type=str, default="cosine", help="scheduler in diffusion"

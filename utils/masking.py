@@ -75,28 +75,19 @@ def generate_block_mask_encoder(b, h, q_idx, kv_idx, block_size=None):
     block_kv = kv_idx // block_size
 
     # ** Block-Causal Mask (M_BC) ** 
-    block_causal = block_q >= block_kv
+    block_causal = (block_q >= block_kv)
     
     return ~block_causal
 
-def generate_block_mask_src(b, h, q_idx, kv_idx, block_size=None):
+def generate_block_mask_decoder(b, h, q_idx, kv_idx, block_size=None):
     # Compute block indices
     block_q = q_idx // block_size
     block_kv = kv_idx // block_size
 
     # ** Block-Causal Mask (M_BC) ** 
-    block_causal = (block_q >= block_kv)
+    block_causal = (block_q == block_kv)
     
     return ~block_causal
-
-def generate_block_mask_tgt(b, h, q_idx, kv_idx, block_size=None):
-    block_q = q_idx // block_size
-    block_kv = kv_idx // block_size
-
-    # ** Block Diagonal Mask (M_BD) ** 
-    block_diagonal = (block_q == block_kv)
-
-    return ~block_diagonal 
 
 class ProbMask:
     def __init__(self, B, H, L, index, scores, device="cpu"):

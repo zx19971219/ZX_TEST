@@ -298,4 +298,4 @@ class PositionalEncoding(nn.Module):
         """
         pe = self.position_encoding(x)
         x = x + pe
-        return self.dropout(x), pe
+        return self.dropout(x)
