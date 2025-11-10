@@ -4,6 +4,7 @@ from utils.tools import (
     EarlyStopping,
     adjust_learning_rate,
     transfer_weights,
+    transfer_weights_ema,
     show_series,
     show_matrix,
 )
@@ -22,6 +23,7 @@ from tensorboardX import SummaryWriter
 import random
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, f1_score
+from copy import deepcopy
 
 warnings.filterwarnings("ignore")
 
@@ -33,21 +35,26 @@ class Exp_TimeDART(Exp_Basic):
 
     def _build_model(self):
         if self.args.downstream_task == "forecast":
-            model = self.model_dict[self.args.model].Model(self.args).float()
+            model = self.model_dict[self.args.model].Model(self.args).float().to(self.device)
         elif self.args.downstream_task == "classification":
-            model = self.model_dict[self.args.model].ClsModel(self.args).float()
+            model = self.model_dict[self.args.model].ClsModel(self.args).float().to(self.device)
+        self.ema_model = deepcopy(model).to(self.device)
+        self.requires_grad(self.ema_model, False)
 
         if self.args.load_checkpoints:
             print("Loading ckpt: {}".format(self.args.load_checkpoints))
 
-            transfer_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            transfer_device = self.device
             model = transfer_weights(
                 self.args.load_checkpoints, model, device=transfer_device
             )
+            self.ema_model = transfer_weights_ema(
+                self.args.load_checkpoints, self.ema_model, device=transfer_device
+            )
 
-        if torch.cuda.device_count() > 1:
-            print("Let's use", torch.cuda.device_count(), "GPUs!", self.args.device_ids)
-            model = nn.DataParallel(model, device_ids=self.args.device_ids)
+        # if torch.cuda.device_count() > 1:
+        #     print("Let's use", torch.cuda.device_count(), "GPUs!", self.args.device_ids)
+        #     model = nn.DataParallel(model, device_ids=self.args.device_ids)
 
         # print out the model size
         print(
@@ -56,6 +63,25 @@ class Exp_TimeDART(Exp_Basic):
         )
 
         return model
+    
+    @torch.no_grad()
+    def update_ema(self, ema_model, model, decay=0.999):
+        """
+        Step the EMA model towards the current model.
+        """
+        ema_params = OrderedDict(ema_model.named_parameters())
+        model_params = OrderedDict(model.named_parameters())
+
+        for name, param in model_params.items():
+            # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
+            ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+            
+    def requires_grad(self, model, flag=True):
+        """
+        Set requires_grad flag for all parameters in a model.
+        """
+        for p in model.parameters():
+            p.requires_grad = flag
 
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag)
@@ -144,6 +170,7 @@ class Exp_TimeDART(Exp_Basic):
                 model_ckpt = {
                     "epoch": epoch,
                     "model_state_dict": self.model_state_dict,
+                    "ema_model_state_dict": self.ema_model.state_dict(),
                 }
                 torch.save(model_ckpt, os.path.join(path, f"ckpt_best.pth"))
 
@@ -158,6 +185,7 @@ class Exp_TimeDART(Exp_Basic):
                 model_ckpt = {  
                     "epoch": epoch,
                     "model_state_dict": self.model_state_dict,
+                    "ema_model_state_dict": self.ema_model.state_dict(),
                 }
                 torch.save(model_ckpt, os.path.join(path, f"ckpt{epoch + 1}.pth"))
 
@@ -165,7 +193,9 @@ class Exp_TimeDART(Exp_Basic):
         train_loss = []
         model_criterion = self._select_criterion()
 
+        self.update_ema(self.ema_model, self.model, decay=0)
         self.model.train()
+        self.ema_model.eval()
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
             train_loader
         ):
@@ -177,6 +207,7 @@ class Exp_TimeDART(Exp_Basic):
             pred_x = self.model(batch_x)
             diff_loss = model_criterion(pred_x, batch_x)
             diff_loss.backward()
+            self.update_ema(self.ema_model, self.model)
 
             model_optim.step()
             train_loss.append(diff_loss.item())
@@ -190,7 +221,7 @@ class Exp_TimeDART(Exp_Basic):
         vali_loss = []
         model_criterion = self._select_criterion()
 
-        self.model.eval()
+        self.ema_model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 vali_loader
@@ -198,7 +229,7 @@ class Exp_TimeDART(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.ema_model(batch_x)
                 diff_loss = model_criterion(pred_x, batch_x)
                 vali_loss.append(diff_loss.item())
 
@@ -236,7 +267,9 @@ class Exp_TimeDART(Exp_Basic):
 
             print("Current learning rate: {:.7f}".format(model_optim.param_groups[0]['lr']))
 
+            self.update_ema(self.ema_model, self.model, decay=0)
             self.model.train()
+            self.ema_model.eval()
             start_time = time.time()
 
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -258,6 +291,8 @@ class Exp_TimeDART(Exp_Basic):
                 loss = model_criteria(pred_x, batch_y)
                 loss.backward()
                 model_optim.step()
+                self.update_ema(self.ema_model, self.model)
+                
                 if self.args.lradj == "step":
                     adjust_learning_rate(
                         model_optim,
@@ -313,7 +348,7 @@ class Exp_TimeDART(Exp_Basic):
 
     def valid(self, vali_loader, model_criteria):
         vali_loss = []
-        self.model.eval()
+        self.ema_model.eval()
         vali_loader = tqdm(vali_loader, desc="Validation")
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -322,7 +357,7 @@ class Exp_TimeDART(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.ema_model(batch_x)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -336,8 +371,11 @@ class Exp_TimeDART(Exp_Basic):
                 vali_loss.append(loss.item())
 
         vali_loss = np.mean(vali_loss)
+        
+        self.update_ema(self.ema_model, self.model, decay=0)
         self.model.train()
-
+        self.ema_model.eval()
+        
         return vali_loss
 
     def test(self):
@@ -350,7 +388,7 @@ class Exp_TimeDART(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        self.model.eval()
+        self.ema_model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 test_loader
@@ -358,7 +396,7 @@ class Exp_TimeDART(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.ema_model(batch_x)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -389,6 +427,7 @@ class Exp_TimeDART(Exp_Basic):
             )
         )
         f.close()
+        np.savez(folder_path + '/results.npz', preds=preds, trues=trues)
 
     def cls_train(self, setting):
         train_data, train_loader = self._get_data(flag="train")

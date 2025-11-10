@@ -164,7 +164,7 @@ parser.add_argument(
     "--num_workers", type=int, default=5, help="data loader num workers"
 )
 parser.add_argument("--itr", type=int, default=1, help="experiments times")
-parser.add_argument("--train_epochs", type=int, default=5, help="train epochs")
+parser.add_argument("--train_epochs", type=int, default=2, help="train epochs")
 parser.add_argument(
     "--batch_size", type=int, default=32, help="batch size of train input data"
 )
@@ -197,7 +197,16 @@ parser.add_argument(
     "--time_steps", type=int, default=1000, help="time steps in diffusion"
 )
 parser.add_argument(
+    "--sample_steps", type=int, default=100, help="sample steps in diffusion"
+)
+parser.add_argument(
+    "--ddim_method", type=str, default="uniform", help="ddim method in diffusion"
+)
+parser.add_argument(
     "--block_num", type=int, default=1, help="block number in diffusion"
+)
+parser.add_argument(
+    "--overlap_ratio", type=float, default=0.5, help="overlap ratio for block-wise auto-regression"
 )
 parser.add_argument(
     "--scheduler", type=str, default="cosine", help="scheduler in diffusion"

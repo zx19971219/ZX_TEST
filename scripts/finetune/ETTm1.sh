@@ -11,24 +11,29 @@ for pred_len in 96 192 336 720; do
         --input_len 336 \
         --label_len 48 \
         --pred_len $pred_len \
-        --e_layers 2 \
+        --e_layers 4 \
+        --d_layers 2 \
         --enc_in 7 \
         --dec_in 7 \
         --c_out 7 \
         --n_heads 8 \
-        --d_model 32 \
-        --d_ff 64 \
-        --patch_len 2 \
-        --stride 2 \
+        --d_model 128 \
+        --cond_dim 128 \
+        --d_ff 256 \
+        --patch_len 4 \
+        --stride 4 \
+        --block_num 4 \
+        --overlap_ratio 0.3 \
         --dropout 0.2 \
         --head_dropout 0.0 \
-        --batch_size 64 \
-        --gpu 0 \
+        --batch_size 16 \
+        --gpu 3 \
         --lr_decay 0.5 \
         --lradj decay \
         --time_steps 1000 \
+        --sample_steps 25 \
         --scheduler cosine \
         --patience 3 \
-        --learning_rate 0.0001 \
+        --learning_rate 0.0002 \
         --pct_start 0.3
 done

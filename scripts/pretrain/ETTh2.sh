@@ -8,7 +8,7 @@ python -u run.py \
     --features M \
     --input_len 336 \
     --e_layers 4 \
-    --d_layers 4 \
+    --d_layers 2 \
     --enc_in 7 \
     --dec_in 7 \
     --c_out 7 \
@@ -18,9 +18,9 @@ python -u run.py \
     --d_ff 256 \
     --patch_len 2 \
     --stride 2 \
-    --head_dropout 0.1 \
-    --dropout 0.2 \
-    --block_num 42 \
+    --head_dropout 0.2 \
+    --dropout 0.4 \
+    --block_num 21 \
     --time_steps 1000 \
     --scheduler cosine \
     --lr_decay 0.95 \

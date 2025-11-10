@@ -185,6 +185,20 @@ def transfer_weights(weights_path, model, exclude_head=True, device='cpu'):
     model = model.to(device)
     return model
 
+def transfer_weights_ema(weights_path, model, exclude_head=True, device='cpu'):
+    new_state_dict = torch.load(weights_path,  map_location=device)['ema_model_state_dict']
+
+    matched_layers = 0
+    unmatched_layers = []
+    for name, param in model.state_dict().items():
+        if exclude_head and 'head' in name: continue
+        if name in new_state_dict:
+            input_param = new_state_dict[name]
+            if input_param.shape == param.shape:
+                param.copy_(input_param)
+    model = model.to(device)
+    return model
+
 def show_series(batch_x, batch_x_m, pred_batch_x, idx, time_points=336):
 
     batch_x = batch_x.permute(0, 2, 1).reshape(batch_x.shape[0], -1)

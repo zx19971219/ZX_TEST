@@ -135,10 +135,13 @@ class Diffusion(nn.Module):
         else:
             raise ValueError(f"Invalid scheduler: {scheduler=}")
 
-        self.alpha = 1 - self.betas
+        self.alpha = 1. - self.betas
         self.gamma = torch.cumprod(self.alpha, dim=0).to(self.device)
         self.gamma_prev = torch.cat([torch.tensor([1.0], device=self.device), self.gamma[:-1]])
         self.block_size = block_size
+        
+        self.sqrt_recip_gamma = torch.sqrt(1. / self.gamma)
+        self.sqrt_recipm1_gamma = torch.sqrt(1. / self.gamma - 1)
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         self.posterior_variance = (
             self.betas * (1. - self.gamma_prev) / (1. - self.gamma)
@@ -215,6 +218,27 @@ class Diffusion(nn.Module):
         noise = torch.randn_like(xt)
         sample = out["mean"] + torch.exp(0.5 * out["log_variance"]) * noise
         return {"sample": sample, "pred_x0": out["pred_x0"]}
+    
+    def predict_noise_from_x0(self, xt, t, x0):
+        return (
+                (self.sqrt_recip_gamma[t].unsqueeze(-1) * xt - x0) /
+                self.sqrt_recipm1_gamma[t].unsqueeze(-1)
+        )
+    
+    def ddim_sample(self, pred_x0, xt, t, eta=0):
+        pred_noise = self.predict_noise_from_x0(xt, t, pred_x0)
+        
+        gamma_t = self.gamma[t].unsqueeze(-1)
+        gamma_prev = self.gamma_prev[t].unsqueeze(-1)
+        sigma_t = eta * ((1 - gamma_prev) / (1 - gamma_t) * (1 - gamma_t / gamma_prev)).sqrt()
+        c = (1 - gamma_prev - sigma_t**2).sqrt()
+        
+        mean_pred = gamma_prev.sqrt() * pred_x0 + c * pred_noise
+        if (t==0).all():
+            return mean_pred
+        noise = torch.randn_like(xt)
+        x_prev = mean_pred + sigma_t * noise
+        return x_prev
 
     def sample_time_steps(self, shape):
         # return torch.randint(0, self.time_steps, shape, device=self.device)
