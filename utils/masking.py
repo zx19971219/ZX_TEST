@@ -77,17 +77,53 @@ def generate_block_mask_encoder(b, h, q_idx, kv_idx, block_size=None):
     # ** Block-Causal Mask (M_BC) ** 
     block_causal = (block_q >= block_kv)
     
-    return ~block_causal
+    return block_causal
 
-def generate_block_mask_decoder(b, h, q_idx, kv_idx, block_size=None):
+def generate_block_mask_train(b, h, q_idx, kv_idx, block_size=None, n=None):
+    xt_flag_q = (q_idx >= n)
+    xt_flag_kv = (kv_idx >= n)
+
     # Compute block indices
-    block_q = q_idx // block_size
-    block_kv = kv_idx // block_size
+    block_q = torch.where(xt_flag_q == 1,
+                          (q_idx - n) // block_size,
+                          q_idx // block_size)
+    block_kv = torch.where(xt_flag_kv == 1,
+                          (kv_idx - n) // block_size,
+                          kv_idx // block_size)
+
+    # **1. Block Diagonal Mask (M_BD) ** 
+    block_diagonal = (block_q == block_kv) & (xt_flag_q == xt_flag_kv)
+
+    # **2. Offset Block-Causal Mask (M_OBC) ** 
+    offset_block_causal = (
+        (block_q > block_kv)
+        & (xt_flag_q == 1)
+        & (xt_flag_kv == 0)
+    )
+
+    # **3. Block-Causal Mask (M_BC) ** 
+    block_causal = (block_q >= block_kv) & (xt_flag_kv == 0) & (xt_flag_q == 0)
+
+    # **4. Combine Masks **
+    return block_diagonal | offset_block_causal | block_causal
+
+def generate_block_mask_sample(b, h, q_idx, kv_idx, block_size=None, n=None):
+    context_flag_q = (q_idx < n)
+    context_flag_kv = (kv_idx < n)
+
+    # Compute block indices
+    boundary_block = (n-1) // block_size + 1
+    block_q = torch.where(context_flag_q == 1,
+                          q_idx // block_size,
+                          (q_idx - n) // block_size + boundary_block)
+    block_kv = torch.where(context_flag_kv == 1,
+                          kv_idx // block_size,
+                          (kv_idx - n) // block_size + boundary_block)
 
     # ** Block-Causal Mask (M_BC) ** 
-    block_causal = (block_q == block_kv)
+    block_causal = (block_q >= block_kv)
     
-    return ~block_causal
+    return block_causal
 
 class ProbMask:
     def __init__(self, B, H, L, index, scores, device="cpu"):

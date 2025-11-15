@@ -1,7 +1,7 @@
 for pred_len in 96; do
     python -u run.py \
-        --task_name finetune \
-        --is_training 1 \
+        --task_name forecast \
+        --is_training 0 \
         --root_path ./datasets/ETT-small/ \
         --data_path ETTh2.csv \
         --model_id ETTh2 \
@@ -22,16 +22,16 @@ for pred_len in 96; do
         --d_ff 256 \
         --patch_len 2 \
         --stride 2 \
-        --block_num 4 \
-        --overlap_ratio 0.4 \
+        --generate_len 48 \
+        --overlap_ratio 0.05 \
         --dropout 0.1 \
         --head_dropout 0.1 \
         --batch_size 16 \
         --gpu 3 \
         --lr_decay 0.5 \
         --lradj decay \
-        --time_steps 1000 \
-        --sample_steps 5 \
+        --time_steps 50 \
+        --sample_steps 50 \
         --scheduler cosine \
         --patience 3 \
         --learning_rate 0.0008 \

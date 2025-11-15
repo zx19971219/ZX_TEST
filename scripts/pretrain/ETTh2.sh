@@ -18,13 +18,16 @@ python -u run.py \
     --d_ff 256 \
     --patch_len 2 \
     --stride 2 \
-    --head_dropout 0.2 \
-    --dropout 0.4 \
-    --block_num 21 \
-    --time_steps 1000 \
+    --head_dropout 0.1 \
+    --dropout 0.2 \
+    --overlap_ratio 0.2 \
+    --block_num 7 \
+    --generate_len 48 \
+    --time_steps 50 \
     --scheduler cosine \
     --lr_decay 0.95 \
     --learning_rate 0.0005 \
     --batch_size 32 \
-    --train_epochs 50 \
+    --train_epochs 5 \
+    --train_epochs_stage2 5 \
     --gpu 3

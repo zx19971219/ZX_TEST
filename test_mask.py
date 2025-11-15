@@ -1,10 +1,11 @@
-from utils.masking import generate_partial_mask, generate_causal_mask, generate_self_only_mask, generate_block_mask_encoder, generate_block_mask_src, generate_block_mask_tgt
+from utils.masking import generate_block_mask_train, generate_block_mask_sample
 import torch
 
-seq_len = 8
+seq_len = 6
 block_size = 2
+n = 3
 
-mask = generate_block_mask_src(
+mask = generate_block_mask_sample(
                 b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
-                kv_idx=torch.arange(seq_len)[None, :], block_size=block_size)
-print(~mask)
+                kv_idx=torch.arange(seq_len)[None, :], block_size=block_size, n=n)
+print(mask)

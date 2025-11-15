@@ -164,7 +164,9 @@ parser.add_argument(
     "--num_workers", type=int, default=5, help="data loader num workers"
 )
 parser.add_argument("--itr", type=int, default=1, help="experiments times")
-parser.add_argument("--train_epochs", type=int, default=2, help="train epochs")
+parser.add_argument("--train_epochs", type=int, default=10, help="train epochs")
+parser.add_argument("--train_epochs_stage2", type=int, default=10, help="train epochs stage2")
+
 parser.add_argument(
     "--batch_size", type=int, default=32, help="batch size of train input data"
 )
@@ -204,6 +206,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--block_num", type=int, default=1, help="block number in diffusion"
+)
+parser.add_argument(
+    "--generate_len", type=int, default=16, help="generate length"
 )
 parser.add_argument(
     "--overlap_ratio", type=float, default=0.5, help="overlap ratio for block-wise auto-regression"
@@ -273,14 +278,26 @@ if args.task_name == "pretrain":
             args.scheduler,
         )
 
+        args.task_name = "pretrain_stage1"
         exp = Exp(args)  # set experiments
         print(
-            ">>>>>>>start pre_training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
+            ">>>>>>>start pre_training stage1: {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
         )
         exp.pretrain()
+        
+        args.load_checkpoints = os.path.join(
+            args.pretrain_checkpoints, args.data, args.transfer_checkpoints
+        )
+        # args.task_name = "pretrain_stage2"
+        # args.train_epochs = args.train_epochs_stage2
+        # exp = Exp(args)  # set experiments
+        # print(
+        #     ">>>>>>>start pre_training stage2: {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
+        # )
+        # exp.pretrain()
         torch.cuda.empty_cache()
 
-elif args.task_name == "finetune":
+elif args.task_name == "forecast":
     for ii in range(args.itr):
         # setting record of experiments
         setting = "{}_{}_{}_{}_il{}_ll{}_pl{}_dm{}_df{}_nh{}_el{}_dl{}_fc{}_dp{}_hdp{}_ep{}_bs{}_lr{}".format(
@@ -309,13 +326,6 @@ elif args.task_name == "finetune":
         )
 
         exp = Exp(args)  # set experiments
-
-        print(">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting))
-        if args.downstream_task == "forecast":
-            exp.train(setting)
-        elif args.downstream_task == "classification":
-            exp.cls_train(setting)
-            pass
 
         print(">>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<".format(setting))
         if args.downstream_task == "forecast":

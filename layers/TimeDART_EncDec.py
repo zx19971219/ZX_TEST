@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from utils.masking import generate_causal_mask, generate_self_only_mask, generate_partial_mask, generate_block_mask_encoder, generate_block_mask_decoder
-
+from utils.masking import generate_causal_mask, generate_self_only_mask, generate_partial_mask, generate_block_mask_train, generate_block_mask_sample, generate_block_mask_encoder
+from utils.rotary_embed import Rotary, apply_rotary_pos_emb
+import einops
+from einops import rearrange
 
 class ChannelIndependence(nn.Module):
     def __init__(
@@ -49,9 +51,9 @@ class TransformerEncoderBlock(nn.Module):
     ):
         super(TransformerEncoderBlock, self).__init__()
 
-        self.attention = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
-        )
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.num_heads = num_heads
+        self.d_model = d_model
         self.norm1 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, feedforward_dim),
@@ -64,15 +66,53 @@ class TransformerEncoderBlock(nn.Module):
         self.conv2 = nn.Conv1d(in_channels=feedforward_dim, out_channels=d_model, kernel_size=1)
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+        
+    def get_qkv(self, x, rotary_cos_sin=None):
+        """
+        input: x [B, S, D]
+        output: qkv [B, S, 3, H, D/H]
+        """
+        qkv = self.qkv_proj(x)  # [B, S, 3*D]
+            
+        qkv = einops.rearrange(
+            qkv,
+            'b s (three h d) -> b s three h d',
+            three=3, h=self.num_heads, d=self.d_model // self.num_heads
+        )
+        
+        if rotary_cos_sin is None:
+            return qkv
+        with torch.amp.autocast('cuda', enabled=False):
+            cos, sin = rotary_cos_sin
+            qkv = apply_rotary_pos_emb(
+                qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+        return qkv
+    
+    def cross_attn(self, qkv, mask=None):
+        scale = qkv.shape[-1]
+        qkv = qkv.transpose(1, 3) # [b, s, 3, h, d] -> [b, h, 3, s, d]
+        
+        mask = mask.bool() if mask is not None else None
+        x = F.scaled_dot_product_attention(
+            query=qkv[:, :, 0],
+            key=qkv[:, :, 1],
+            value=qkv[:, :, 2],
+            attn_mask=mask,
+            is_causal=False,
+            scale=1 / math.sqrt(scale))
+        x = x.transpose(1, 2)
+        x = rearrange(x, 'b s h d -> b s (h d)') # [b, s, h*d]
+        return x
 
-    def forward(self, x, mask):
+    def forward(self, x, rotary_cos_sin, mask):
         """
         :param x: [batch_size * num_features, seq_len, d_model]
-        :param mask: [1, 1, seq_len, seq_len]
+        :param mask: [seq_len, seq_len]
         :return: [batch_size * num_features, seq_len, d_model]
         """
         # Self-attention
-        attn_output, _ = self.attention(x, x, x, attn_mask=mask)
+        qkv = self.get_qkv(x, rotary_cos_sin)
+        attn_output = self.cross_attn(qkv, mask=mask)
         x = self.norm1(x + self.dropout(attn_output))
 
         # Feed-forward network
@@ -101,6 +141,7 @@ class CausalTransformer(nn.Module):
             ]
         )
         self.norm = nn.LayerNorm(d_model)
+        self.rotary_emb = Rotary(d_model // num_heads)
         self.block_size = block_size
 
     def forward(self, x, is_mask=True):
@@ -109,8 +150,9 @@ class CausalTransformer(nn.Module):
         mask = generate_block_mask_encoder(
                 b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
                 kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size).to(x.device) if is_mask else None
+        rotary_cos_sin = self.rotary_emb(x)
         for layer in self.layers:
-            x = layer(x, mask)
+            x = layer(x, rotary_cos_sin, mask)
 
         x = self.norm(x)
         return x
@@ -327,17 +369,11 @@ class TimestepEmbedder(nn.Module):
 
 class TransformerDecoderBlock(nn.Module):
     def __init__(
-        self, d_model: int, cond_dim:int, num_heads: int, feedforward_dim: int, dropout: float
+        self, d_model: int, model_length: int, cond_dim:int, num_heads: int, feedforward_dim: int, dropout: float
     ):
         super(TransformerDecoderBlock, self).__init__()
 
-        self.self_attention = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
-        )
         self.adaln1 = AdaLN(d_model, cond_dim)
-        self.encoder_attention = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
-        )
         self.adaln2 = AdaLN(d_model, cond_dim)
         self.ff = nn.Sequential(
             nn.Linear(d_model, feedforward_dim),
@@ -345,37 +381,76 @@ class TransformerDecoderBlock(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(feedforward_dim, d_model),
         )
-        self.adaln3 = AdaLN(d_model, cond_dim)
         self.dropout = nn.Dropout(dropout)
-
-    def forward(self, query, key, value, cond, tgt_mask, src_mask):
+        self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.model_length = model_length
+        self.num_heads = num_heads
+        self.d_model = d_model
+        
+    def get_qkv(self, x, rotary_cos_sin=None):
         """
-        :param query: [batch_size * num_features, seq_len, d_model]
-        :param key: [batch_size * num_features, seq_len, d_model]
-        :param value: [batch_size * num_features, seq_len, d_model]
+        input: x [B, S, D]
+        output: qkv [B, S, 3, H, D/H]
+        """
+        qkv = self.qkv_proj(x)  # [B, S, 3*D]
+            
+        qkv = einops.rearrange(
+            qkv,
+            'b s (three h d) -> b s three h d',
+            three=3, h=self.num_heads, d=self.d_model // self.num_heads
+        )
+        
+        if rotary_cos_sin is None:
+            return qkv
+        with torch.amp.autocast('cuda', enabled=False):
+            cos, sin = rotary_cos_sin
+            qkv = apply_rotary_pos_emb(
+                qkv, cos.to(qkv.dtype), sin.to(qkv.dtype))
+        return qkv
+    
+    def cross_attn(self, qkv, mask=None):
+        scale = qkv.shape[-1]
+        qkv = qkv.transpose(1, 3) # [b, s, 3, h, d] -> [b, h, 3, s, d]
+        
+        mask = mask.bool() if mask is not None else None
+        x = F.scaled_dot_product_attention(
+            query=qkv[:, :, 0],
+            key=qkv[:, :, 1],
+            value=qkv[:, :, 2],
+            attn_mask=mask,
+            is_causal=False,
+            scale=1 / math.sqrt(scale))
+        x = x.transpose(1, 2)
+        x = rearrange(x, 'b s h d -> b s (h d)') # [b, s, h*d]
+        return x
+
+    def forward(self, x, cond, rotary_cos_sin=None, mask=None, sample=False):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
         :param cond: [batch_size * num_features, seq_len, cond_dim]
-        :param mask: [1, 1, seq_len, seq_len]
+        :param rotary_cos_sin: [1, seq_len, 3, 1, d_model]
+        :param mask: [2 * seq_len, 2 * seq_len] 
         :return: [batch_size * num_features, seq_len, d_model]
         """
-        # Self-attention
-        query_skip = query
-        query, gate1 = self.adaln1(query, cond)
-        attn_output, _ = self.self_attention(query, query, query, attn_mask=tgt_mask)
-        query = query_skip + self.dropout(attn_output) * gate1
-
-        # Encoder attention
-        query_skip = query
-        query, gate2 = self.adaln2(query, cond)
-        attn_output, _ = self.encoder_attention(query, key, value, attn_mask=src_mask)
-        query = query_skip + self.dropout(attn_output) * gate2
+        # cross-attention
+        x_skip = x
+        x, gate1 = self.adaln1(x, cond)
+        if not sample:
+            qkv_x0 = self.get_qkv(x[:, :self.model_length], rotary_cos_sin)
+            qkv_xt = self.get_qkv(x[:, self.model_length:], rotary_cos_sin)
+            qkv = torch.cat((qkv_x0, qkv_xt), dim=1)
+        else: 
+            qkv = self.get_qkv(x, rotary_cos_sin)
+        attn_output = self.cross_attn(qkv, mask=mask)
+        x = x_skip + self.dropout(attn_output) * gate1
 
         # Feed-forward network
-        query_skip = query
-        query, gate3 = self.adaln3(query, cond)
-        ff_output = self.ff(query)
-        query = query_skip + self.dropout(ff_output) * gate3
+        x_skip = x
+        x, gate2 = self.adaln2(x, cond)
+        ff_output = self.ff(x)
+        x = x_skip + self.dropout(ff_output) * gate2
 
-        return query
+        return x
 
 class FinalLayer(nn.Module):
   def __init__(self, d_model, out_channels, cond_dim):
@@ -394,6 +469,7 @@ class DenoisingPatchDecoder(nn.Module):
     def __init__(
         self,
         d_model: int,
+        model_length: int,
         cond_dim: int,
         num_heads: int,
         num_layers: int,
@@ -407,35 +483,46 @@ class DenoisingPatchDecoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                TransformerDecoderBlock(d_model, cond_dim, num_heads, feedforward_dim, dropout)
+                TransformerDecoderBlock(d_model, model_length, cond_dim, num_heads, feedforward_dim, dropout)
                 for _ in range(num_layers)
             ]
         )
         self.mask_ratio = mask_ratio
         self.block_size = block_size
         self.t_map = TimestepEmbedder(cond_dim)
+        self.rotary_emb = Rotary(d_model // num_heads)
         self.final_layer = FinalLayer(d_model, out_channels, cond_dim)
+        self.model_length = model_length
 
-    def forward(self, query, key, value, t, is_tgt_mask=True, is_src_mask=True, context_cond=None):
-        seq_len = query.size(1)
+    def forward(self, x, t, context_cond=None, is_mask=True, sample=False):
+        seq_len = x.size(1)
         cond = F.silu(self.t_map(t)) # [B, S] -> [B, S, cond_dim]
         if context_cond is not None:
             cond = cond + context_cond
         
-        tgt_mask = (
-            generate_block_mask_decoder(
-                b=None, h=None, q_idx=torch.arange(query.size(1))[:, None], 
-                kv_idx=torch.arange(query.size(1))[None, :], block_size=self.block_size).to(query.device) if is_tgt_mask else None
-        )
-        src_mask = (
-            generate_block_mask_decoder(
-                b=None, h=None, q_idx=torch.arange(query.size(1))[:, None], 
-                kv_idx=torch.arange(query.size(1))[None, :], block_size=self.block_size).to(query.device) if is_src_mask else None
-        )
-        for layer in self.layers:
-            query = layer(query, key, value, cond, tgt_mask, src_mask)
+        # pretraining
+        if not sample:
+            rotary_cos_sin = self.rotary_emb(x[:, :self.model_length])
+            self.mask = generate_block_mask_train(
+                b=None, h=None, q_idx=torch.arange(self.model_length*2)[:, None], 
+                kv_idx=torch.arange(self.model_length*2)[None, :], block_size=self.block_size, n=self.model_length).to(x.device) if is_mask else None# [2*seq_len, 2*seq_len]
+            cond_x0 = torch.zeros_like(cond).to(x.device)
+            cond = torch.cat((cond_x0, cond), dim=1)
             
-        x = self.final_layer(query, cond)
+        # forecasting
+        else:
+            rotary_cos_sin = self.rotary_emb(x)
+            self.mask = generate_block_mask_sample(
+                b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
+                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size, n=seq_len-self.model_length).to(x.device) if is_mask else None# [seq_len, seq_len]
+            cond_x0 = torch.zeros(cond.shape[0], seq_len-self.model_length, cond.shape[2]).to(x.device)
+            cond = torch.cat((cond_x0, cond), dim=1)
+        
+        for layer in self.layers:
+            x = layer(x, cond, rotary_cos_sin, mask=self.mask, sample=sample)
+        
+        x = self.final_layer(x, cond)
+        x = x[:, -self.model_length:]
         return x
 
 
