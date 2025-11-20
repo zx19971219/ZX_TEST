@@ -207,11 +207,12 @@ class Exp_TimeDART(Exp_Basic):
             batch_y = batch_y.float().to(self.device)
             
             if self.args.task_name == "pretrain_stage1":
-                pred_x = self.model(batch_x)
-                diff_loss = model_criterion(pred_x, batch_x)
+                pred_y = self.model(batch_x, batch_y)
+                diff_loss = model_criterion(pred_y, batch_y)
             else:
-                pred_x = self.model(batch_x, batch_y)
-                diff_loss = model_criterion(pred_x, batch_y)
+                pred_y = self.model(batch_x)
+                diff_loss = model_criterion(pred_y, batch_y)
+                # diff_loss = diff_loss + align_loss
             diff_loss.backward()
             self.update_ema(self.ema_model, self.model)
 
@@ -236,11 +237,12 @@ class Exp_TimeDART(Exp_Basic):
                 batch_y = batch_y.float().to(self.device)
 
                 if self.args.task_name == "pretrain_stage1":
-                    pred_x = self.ema_model(batch_x)
-                    diff_loss = model_criterion(pred_x, batch_x)
+                    pred_y = self.ema_model(batch_x, batch_y)
+                    diff_loss = model_criterion(pred_y, batch_y)
                 else:
-                    pred_x = self.ema_model(batch_x, batch_y)
-                    diff_loss = model_criterion(pred_x, batch_y)
+                    pred_y = self.ema_model(batch_x)
+                    diff_loss = model_criterion(pred_y, batch_y)
+                    # diff_loss = diff_loss + align_loss
                 vali_loss.append(diff_loss.item())
 
         vali_loss = np.mean(vali_loss)

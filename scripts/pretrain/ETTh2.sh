@@ -20,14 +20,15 @@ python -u run.py \
     --stride 2 \
     --head_dropout 0.1 \
     --dropout 0.2 \
-    --overlap_ratio 0.2 \
-    --block_num 7 \
+    --overlap_ratio 1 \
+    --model_length 96 \
+    --block_num 2 \
     --generate_len 48 \
-    --time_steps 50 \
+    --time_steps 20 \
     --scheduler cosine \
     --lr_decay 0.95 \
     --learning_rate 0.0005 \
     --batch_size 32 \
-    --train_epochs 5 \
-    --train_epochs_stage2 5 \
+    --train_epochs 10 \
+    --train_epochs_stage2 10 \
     --gpu 3

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
 from layers.TimeDART_EncDec import (
     ChannelIndependence,
@@ -98,82 +99,56 @@ class Model(nn.Module):
             d_model=self.d_model,
         )
 
-        self.positional_encoding = PositionalEncoding(
-            d_model=self.d_model,
-            dropout=self.dropout,
-        )
-
-        # Decoder
+        self.seq_len = int((self.pred_len - self.patch_len) / self.stride) + 1
+        self.context_len = int((self.input_len - self.patch_len) / self.stride) + 1
+        self.sample_steps = args.sample_steps
+        self.generate_len = args.generate_len
+             
         if self.task_name == "pretrain_stage1":
-            self.seq_len = int((self.input_len - self.patch_len) / self.stride) + 1
-            self.block_size = self.seq_len // args.block_num
+            self.block_size = (self.seq_len // args.block_num)
+            self.overlap_len = self.block_size
             
-            # decoder 
-            self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=args.d_model,
-                model_length=self.seq_len,
-                cond_dim=args.cond_dim,
-                num_layers=args.d_layers,
-                num_heads=args.n_heads,
-                feedforward_dim=args.d_ff,
-                block_size=self.block_size,
-                out_channels=args.patch_len,
-                dropout=args.dropout,
-                mask_ratio=args.mask_ratio,
-            )
-        
             self.projection = FlattenHead(
                 seq_len=self.seq_len,
-                d_model=self.patch_len,
-                pred_len=args.input_len,
-                dropout=args.head_dropout,
-            )
-            
-        else:
-            self.seq_len = int((self.pred_len - self.patch_len) / self.stride) + 1
-            self.sample_steps = args.sample_steps
-            self.generate_len = args.generate_len
-            self.block_size = int((self.generate_len - self.patch_len) / self.stride) + 1
-            self.overlap_ratio = 0
-            self.overlap_len = int(self.block_size * (1 + self.overlap_ratio))
-            
-            # decoder 
-            self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=args.d_model,
-                model_length=self.overlap_len,
-                cond_dim=args.cond_dim,
-                num_layers=args.d_layers,
-                num_heads=args.n_heads,
-                feedforward_dim=args.d_ff,
-                block_size=self.block_size,
-                out_channels=args.patch_len,
-                dropout=args.dropout,
-                mask_ratio=args.mask_ratio,
-            )
-            
-            self.head = FlattenHead(
-                seq_len=self.block_size,
                 d_model=args.patch_len,
-                pred_len=self.generate_len,
+                pred_len=self.pred_len,
                 dropout=args.head_dropout,
             )
-        
-            self.context_len = int((self.input_len - self.patch_len) / self.stride) + 1
+            
+            self.diffusion = Diffusion(
+                time_steps=args.time_steps,
+                block_size=self.block_size,
+                device=self.device,
+                scheduler=args.scheduler,
+            )
             
             self.context_map = ContextHead(
                 d_model=self.d_model,
                 cond_dim=self.cond_dim,
                 seq_len=self.context_len,
-                block_size=self.overlap_len,
+                block_size=self.block_size,
             )
-        
-        # Encoder (Casual Trasnformer)
-        self.diffusion = Diffusion(
-            time_steps=args.time_steps,
-            block_size=self.block_size,
-            device=self.device,
-            scheduler=args.scheduler,
-        )
+
+        else:
+            self.block_size = int((self.generate_len - self.patch_len) / self.stride) + 1
+            self.overlap_ratio = args.overlap_ratio
+            self.overlap_len = int(self.block_size * (1 + self.overlap_ratio))
+            # self.model_length = int((args.model_length - self.patch_len) / self.stride) + 1
+            self.model_length = self.overlap_len
+            
+            self.diffusion = Diffusion(
+                time_steps=args.time_steps,
+                block_size=self.block_size,
+                device=self.device,
+                scheduler=args.scheduler,
+            )
+            
+            self.context_map = ContextHead(
+                d_model=self.d_model,
+                cond_dim=self.cond_dim,
+                seq_len=self.context_len,
+                block_size=self.block_size,
+            )
         
         self.encoder = CausalTransformer(
             d_model=args.d_model,
@@ -183,63 +158,76 @@ class Model(nn.Module):
             dropout=args.dropout,
             num_layers=args.e_layers,
         )
-
-
-    def pretrain(self, x):
-        # [batch_size, input_len, num_features]
-        batch_size, input_len, num_features = x.size()
-        if self.use_norm:
-            # Instance Normalization
-            means = torch.mean(
-                x, dim=1, keepdim=True
-            ).detach()  # [batch_size, 1, num_features], detach from gradient
-            x = x - means  # [batch_size, input_len, num_features]
-            stdevs = torch.sqrt(
-                torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
-            ).detach()  # [batch_size, 1, num_features]
-            x = x / stdevs  # [batch_size, input_len, num_features]
-
-        # Channel Independence
-        x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
-        # Patch
-        x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-
-        x_embedding = self.enc_embedding(
-            x_patch
-        )  # [batch_size * num_features, seq_len, d_model]
-        # x_embedding = self.encoder(x_embedding)
         
-        # Noising Diffusion
-        noise_x_patch, noise, t = self.diffusion(
-            x_patch
-        )  # [batch_size * num_features, seq_len, patch_len]
-        noise_x_embedding = self.enc_embedding(
-            noise_x_patch
-        )  # [batch_size * num_features, seq_len, d_model]
+        self.denoising_patch_decoder = DenoisingPatchDecoder(
+            d_model=args.d_model,
+            cond_dim=args.cond_dim,
+            num_layers=args.d_layers,
+            num_heads=args.n_heads,
+            feedforward_dim=args.d_ff,
+            block_size=self.block_size,
+            out_channels=args.patch_len,
+            dropout=args.dropout,
+            mask_ratio=args.mask_ratio,
+        )
+        
+        self.head = FlattenHead(
+            seq_len=self.block_size,
+            d_model=args.patch_len,
+            pred_len=self.generate_len,
+            dropout=args.head_dropout,
+        )
+    
+    def pretrain(self, x, y):
+        batch_size, _, num_features = x.size()
+        if self.use_norm:
+            means_x = torch.mean(x, dim=1, keepdim=True).detach()
+            x = x - means_x
+            stdevs_x = torch.sqrt(
+            torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()
+            x = x / stdevs_x
+            
+            means_y = torch.mean(y, dim=1, keepdim=True).detach()
+            y = y - means_y
+            stdevs_y = torch.sqrt(
+            torch.var(y, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()
+            y = y / stdevs_y
 
-        # For Denoising Patch Decoder
-        input_embedding = torch.cat([x_embedding, noise_x_embedding], dim=1)
-        predict_x = self.denoising_patch_decoder(
+        x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
+        x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+        y = self.channel_independence(y)  
+        y = self.patch(y)  
+        
+        num_strides = self.seq_len // self.block_size
+        x_embedding = self.enc_embedding(x)
+        self.c_cond = self.context_map(x_embedding)
+        self.c_cond = self.c_cond.repeat(1, num_strides, 1)
+        
+        yt, noise, t = self.diffusion(y)
+        y_embedding = self.enc_embedding(y)
+        yt_embedding = self.enc_embedding(yt)
+        input_embedding = torch.cat([y_embedding, yt_embedding], dim=1)
+            
+        pred_y = self.denoising_patch_decoder(
             x=input_embedding,
             t=t,
-        )  # [batch_size * num_features, seq_len, patch_len]
-
-        # For Decoder
-        predict_x = predict_x.reshape(
-            batch_size, num_features, -1, self.patch_len
-        )  # [batch_size, num_features, seq_len, patch_len]
-        predict_x = self.projection(predict_x)  # [batch_size, input_len, num_features]
-
-        # Instance Denormalization
+            model_length=self.seq_len,
+            context_cond=self.c_cond,
+        )
+            
+        preds = pred_y.reshape(batch_size, num_features, -1, self.patch_len)  # [batch_size, num_features, seq_len, patch_len]
+        # preds = self.projection(preds)
+        preds = preds.chunk(num_strides, dim=2)  
+        preds = torch.cat([self.head(block) for block in preds], dim=1)
+                
+        # denormalization
         if self.use_norm:
-            predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
-                1, input_len, 1
-            )  # [batch_size, input_len, num_features]
-            predict_x = predict_x + (means[:, 0, :].unsqueeze(1)).repeat(
-                1, input_len, 1
-            )  # [batch_size, input_len, num_features]
+            preds = preds * (stdevs_x[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+            preds = preds + (means_x[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
-        return predict_x
+        return preds
     
     def pretrain_stage2(self, x, y):
         batch_size, _, num_features = x.size()
@@ -262,58 +250,63 @@ class Model(nn.Module):
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
         y = self.channel_independence(y)  
         y = self.patch(y)  
-
-        # forecast
+        
+        x_embedding = self.enc_embedding(x)
+        self.c_cond = self.context_map(x_embedding)
+        
         num_strides = self.seq_len // self.block_size
         assert self.seq_len % self.block_size == 0, "seq_len must be divisible by block_size"
         
-        context = x.clone()  # [batch_size * num_features, seq_len, patch_len]
-        overlap_len = self.overlap_len - self.block_size
+        context = x.clone()
+        align_loss = []
+        criterion = nn.MSELoss()
+        
         for stride in range(num_strides):
-            xt, noise, t = self.diffusion(y[:, stride * self.block_size : (stride + 1) * self.block_size]) 
-            window = context[:, -self.context_len:]    
-            # xt_prefix = window[:, -overlap_len:]
-            # xt = torch.cat([xt_prefix, xt], dim=1)
+            end_idx = (stride + 1) * self.block_size
+            start_idx = max(end_idx - self.model_length, 0)
+            fwd_idx = torch.arange(start_idx, end_idx)
+            y_block = y[:, stride * self.block_size : (stride + 1) * self.block_size]
             
-            window_embedding = self.enc_embedding(window)
-            # window_embedding = self.encoder(window_embedding, is_mask=False)
-            xt_embedding = self.enc_embedding(xt)  # [batch_size * num_features, overlap + block, d_model]
-            input_embedding = torch.cat([window_embedding, xt_embedding], dim=1)
-                
-            if stride == 0:
-                self.c_cond = self.context_map(window_embedding)
-            xt = self.denoising_patch_decoder(
-                x=input_embedding,
+            yt, noise, t = self.diffusion(y_block)
+            outputs = torch.cat([outputs, yt], dim=1) if stride != 0 else yt
+            inputs = outputs[:, fwd_idx]
+            
+            inputs_embedding = self.enc_embedding(inputs) #[B, model_length, D]
+            context_embedding = self.enc_embedding(context)
+            # inputs_embedding = torch.cat([context_embedding, inputs_embedding], dim=1)
+            
+            pred_y = self.denoising_patch_decoder(
+                x=inputs_embedding,
                 t=t,
+                model_length=end_idx-start_idx,
                 context_cond=self.c_cond,
-                sample=True
-            ) # [batch_size * num_features, overlap_len, patch_len]
+                sample=True,
+            )
             
-            if stride == 0:
-                outputs = xt
-            else:
-                outputs = torch.cat([outputs, xt], dim=1)
-                
-            context = torch.cat([context, outputs[:, -self.block_size :]], dim=1)
-
-        outputs = outputs.reshape(batch_size, num_features, -1, self.patch_len)  # [batch_size, num_features, seq_len, patch_len]
-        outputs = outputs.chunk(num_strides, dim=2)  
-        outputs = torch.cat([self.head(block) for block in outputs], dim=1)
+            outputs[:, fwd_idx] = pred_y
+           
+        pred_y = outputs.reshape(batch_size, num_features, -1, self.patch_len)  # [batch_size, num_features, pred_len, patch_len]
+        pred_y = pred_y.chunk(num_strides, dim=2)  
+        pred_y = torch.cat([self.head(block) for block in pred_y], dim=1)
                 
         # denormalization
         if self.use_norm:
-            outputs = outputs * (stdevs_x[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
-            outputs = outputs + (means_x[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+            pred_y = pred_y * (stdevs_x[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+            pred_y = pred_y + (means_x[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
-        return outputs
+        # if align_loss:
+        #     align_loss = torch.stack(align_loss).mean()
+        # else:
+        #     align_loss = torch.tensor(0.0, device=context.device)
+        
+        align_loss = torch.tensor(0.0, device=context.device)
+        
+        return pred_y, align_loss
     
     def sample(self, context, xt, stride=None):
         # context: [batch_size * num_features, context_len, patch_len]
-        # xt: [batch_size * num_features, block_size, patch_len]
-        context_embedding = self.enc_embedding(context)  # [batch_size * num_features, context, d_model]
-        # context_embedding = self.encoder(context_embedding, is_mask=False)
-        if stride == 0:
-            self.c_cond = self.context_map(context_embedding)
+        # xt: [batch_size * num_features, overlap_len or block_size, patch_len]
+        context_embedding = self.enc_embedding(context) # [batch_size * num_features, context, d_model]
         
         timesteps = torch.linspace(
             start=0, 
@@ -324,16 +317,30 @@ class Model(nn.Module):
         ).flip(0)
             
         for timestep in timesteps:
-            xt_embedding = self.enc_embedding(xt)  # [batch_size * num_features, block_size, d_model]
-            timestep = timestep.expand(xt.shape[0], xt.shape[1])
-            input_embedding = torch.cat([context_embedding, xt_embedding], dim=1)
+            # timestep = timestep.expand(xt.shape[0], self.block_size)
+            # timestep_prefix = torch.zeros(xt.shape[0], xt.shape[1]-self.block_size, dtype=torch.long).to(xt.device)
+            # timestep = torch.cat([timestep_prefix, timestep], dim=1)
+            timestep_diffusion = timestep.expand(xt.shape[0], xt.shape[1])
+            timestep = timestep.expand(xt.shape[0], self.block_size)
+            # timestep_prefix = torch.zeros(xt.shape[0], xt.shape[1]-self.block_size, dtype=torch.long).to(xt.device)
+            # timestep_diffusion = torch.cat([timestep_prefix, timestep], dim=1)
+            
+            input_embedding = self.enc_embedding(xt)  # [batch_size * num_features, overlap + block_size, d_model]
+            # input_embedding = torch.cat([context_embedding, input_embedding], dim=1)
+    
             pred_x0 = self.denoising_patch_decoder(
                 x=input_embedding,
                 t=timestep,
+                model_length=xt.shape[1],
                 context_cond=self.c_cond,
-                sample=True
-            ) # [batch_size * num_features, block_size, patch_len]
-            xt = self.diffusion.p_sample(pred_x0, xt, timestep, clip_denoised=False)["sample"]
+                sample=True,
+            ) # [batch_size * num_features, overlap + block_size, patch_len]
+            
+            xt = self.diffusion.p_sample(
+                pred_x0, 
+                xt, 
+                timestep_diffusion, 
+                clip_denoised=False)["sample"]
             
         return xt
 
@@ -354,24 +361,26 @@ class Model(nn.Module):
         num_strides = self.seq_len // self.block_size
         assert self.seq_len % self.block_size == 0, "seq_len must be divisible by block_size"
         
-        context = x.clone()  # [batch_size * num_features, seq_len, patch_len]
-        overlap_len = self.overlap_len - self.block_size
-        for stride in range(num_strides):
-            window = context[:, -self.context_len:]
-            # xt_prefix = window[:, -overlap_len:]
-            xt = torch.randn(context.shape[0], self.block_size, self.patch_len, device=context.device)
-            # xt = torch.cat([xt_prefix, xt], dim=1)
-            xt = self.sample(window, xt, stride) # [batch_size * num_features, block_size, patch_len]
-            
-            # if stride != 0:
-            #     context = torch.cat([context[:, :-overlap_len], xt], dim=1)
-            # else:
-            #     context = torch.cat([context, xt[:, overlap_len:]], dim=1)
-            context = torch.cat([context, xt], dim=1)
-
-        x = context[:, -self.seq_len:, :] # [batch_size * num_features, seq_len, patch_len]
-        x = x.reshape(batch_size, num_features, -1, self.patch_len)  # [batch_size, num_features, seq_len, patch_len]
+        x_embedding = self.enc_embedding(x)
+        self.c_cond = self.context_map(x_embedding)
         
+        context = x.clone()  # [batch_size * num_features, seq_len, patch_len]
+        overlap = max(self.overlap_len - self.block_size, 0)
+        has_overlap = overlap > 0
+        for stride in range(num_strides):
+            end_idx = (stride + 1) * self.block_size
+            start_idx = max(end_idx - self.model_length, 0)
+            fwd_idx = torch.arange(start_idx, end_idx)
+            
+            xt = torch.randn(context.shape[0], self.block_size, self.patch_len, device=context.device)
+            outputs = torch.cat([outputs, xt], dim=1) if stride != 0 else xt
+            inputs = outputs[:, fwd_idx]
+            xt = self.sample(context, inputs, stride) # [batch_size * num_features, overlap_len or block_size, patch_len]
+            
+            outputs[:, fwd_idx] = xt
+
+        # x = context[:, -self.seq_len:, :] # [batch_size * num_features, seq_len, patch_len]
+        x = outputs.reshape(batch_size, num_features, -1, self.patch_len)  # [batch_size, num_features, seq_len, patch_len]
         x_blocks = x.chunk(num_strides, dim=2)  
         outputs = torch.cat([self.head(block) for block in x_blocks], dim=1)
                 
@@ -385,9 +394,9 @@ class Model(nn.Module):
     def forward(self, batch_x, batch_y=None):
 
         if self.task_name == "pretrain_stage1":
-            return self.pretrain(batch_x)
+            return self.pretrain(batch_x, batch_y)
         elif self.task_name == "pretrain_stage2":
-            dec_out = self.pretrain_stage2(batch_x, batch_y)
+            dec_out = self.forecast(batch_x)
             return dec_out[:, -self.pred_len: , :]
         else:
             dec_out = self.forecast(batch_x)

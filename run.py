@@ -199,7 +199,7 @@ parser.add_argument(
     "--time_steps", type=int, default=1000, help="time steps in diffusion"
 )
 parser.add_argument(
-    "--sample_steps", type=int, default=100, help="sample steps in diffusion"
+    "--sample_steps", type=int, default=50, help="sample steps in diffusion"
 )
 parser.add_argument(
     "--ddim_method", type=str, default="uniform", help="ddim method in diffusion"
@@ -212,6 +212,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--overlap_ratio", type=float, default=0.5, help="overlap ratio for block-wise auto-regression"
+)
+parser.add_argument(
+    "--model_length", type=int, default=1024, help="the generation length of decoder"
 )
 parser.add_argument(
     "--scheduler", type=str, default="cosine", help="scheduler in diffusion"
@@ -285,9 +288,9 @@ if args.task_name == "pretrain":
         )
         exp.pretrain()
         
-        args.load_checkpoints = os.path.join(
-            args.pretrain_checkpoints, args.data, args.transfer_checkpoints
-        )
+        # args.load_checkpoints = os.path.join(
+        #     args.pretrain_checkpoints, args.data, args.transfer_checkpoints
+        # )
         # args.task_name = "pretrain_stage2"
         # args.train_epochs = args.train_epochs_stage2
         # exp = Exp(args)  # set experiments

@@ -296,8 +296,7 @@ class Diffusion(nn.Module):
         _eps_b = torch.randint(0, self.time_steps, (shape[0], num_blocks), device=self.device) # [batch_size*feature_num, num_blocks]
         # expand to token level
         t = _eps_b
-        if block_size != shape[-1]:
-            t = t.repeat_interleave(block_size, dim=-1) # [batch_size*feature_num, input_len]
+        t = t.repeat_interleave(block_size, dim=-1) # [batch_size*feature_num, input_len]
         return t
 
     def noise(self, x, t):
@@ -369,7 +368,7 @@ class TimestepEmbedder(nn.Module):
 
 class TransformerDecoderBlock(nn.Module):
     def __init__(
-        self, d_model: int, model_length: int, cond_dim:int, num_heads: int, feedforward_dim: int, dropout: float
+        self, d_model: int, cond_dim:int, num_heads: int, feedforward_dim: int, dropout: float
     ):
         super(TransformerDecoderBlock, self).__init__()
 
@@ -383,7 +382,6 @@ class TransformerDecoderBlock(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
         self.qkv_proj = nn.Linear(d_model, 3 * d_model, bias=False)
-        self.model_length = model_length
         self.num_heads = num_heads
         self.d_model = d_model
         
@@ -424,7 +422,7 @@ class TransformerDecoderBlock(nn.Module):
         x = rearrange(x, 'b s h d -> b s (h d)') # [b, s, h*d]
         return x
 
-    def forward(self, x, cond, rotary_cos_sin=None, mask=None, sample=False):
+    def forward(self, x, cond, model_length, rotary_cos_sin_context=None, rotary_cos_sin=None, mask=None, sample=False):
         """
         :param x: [batch_size * num_features, seq_len, d_model]
         :param cond: [batch_size * num_features, seq_len, cond_dim]
@@ -436,8 +434,8 @@ class TransformerDecoderBlock(nn.Module):
         x_skip = x
         x, gate1 = self.adaln1(x, cond)
         if not sample:
-            qkv_x0 = self.get_qkv(x[:, :self.model_length], rotary_cos_sin)
-            qkv_xt = self.get_qkv(x[:, self.model_length:], rotary_cos_sin)
+            qkv_x0 = self.get_qkv(x[:, :model_length], rotary_cos_sin_context)
+            qkv_xt = self.get_qkv(x[:, model_length:], rotary_cos_sin)
             qkv = torch.cat((qkv_x0, qkv_xt), dim=1)
         else: 
             qkv = self.get_qkv(x, rotary_cos_sin)
@@ -469,7 +467,6 @@ class DenoisingPatchDecoder(nn.Module):
     def __init__(
         self,
         d_model: int,
-        model_length: int,
         cond_dim: int,
         num_heads: int,
         num_layers: int,
@@ -483,7 +480,7 @@ class DenoisingPatchDecoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                TransformerDecoderBlock(d_model, model_length, cond_dim, num_heads, feedforward_dim, dropout)
+                TransformerDecoderBlock(d_model, cond_dim, num_heads, feedforward_dim, dropout)
                 for _ in range(num_layers)
             ]
         )
@@ -492,9 +489,9 @@ class DenoisingPatchDecoder(nn.Module):
         self.t_map = TimestepEmbedder(cond_dim)
         self.rotary_emb = Rotary(d_model // num_heads)
         self.final_layer = FinalLayer(d_model, out_channels, cond_dim)
-        self.model_length = model_length
+        self.cond_dim = cond_dim
 
-    def forward(self, x, t, context_cond=None, is_mask=True, sample=False):
+    def forward(self, x, t, model_length, context_cond=None, is_mask=True, sample=False):
         seq_len = x.size(1)
         cond = F.silu(self.t_map(t)) # [B, S] -> [B, S, cond_dim]
         if context_cond is not None:
@@ -502,27 +499,35 @@ class DenoisingPatchDecoder(nn.Module):
         
         # pretraining
         if not sample:
-            rotary_cos_sin = self.rotary_emb(x[:, :self.model_length])
+            rotary_cos_sin_context = self.rotary_emb(x[:, :-model_length])
+            cos_context, sin_context = rotary_cos_sin_context
+            cos = cos_context[:, -model_length:]
+            sin = sin_context[:, -model_length:]
+            rotary_cos_sin = (cos, sin)
+            
             self.mask = generate_block_mask_train(
-                b=None, h=None, q_idx=torch.arange(self.model_length*2)[:, None], 
-                kv_idx=torch.arange(self.model_length*2)[None, :], block_size=self.block_size, n=self.model_length).to(x.device) if is_mask else None# [2*seq_len, 2*seq_len]
-            cond_x0 = torch.zeros_like(cond).to(x.device)
+                b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
+                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size, n=seq_len - model_length).to(x.device) if is_mask else None# [2*seq_len, 2*seq_len]
+            
+            cond_x0 = torch.zeros(x.shape[0], seq_len-model_length, self.cond_dim).to(x.device)
             cond = torch.cat((cond_x0, cond), dim=1)
             
         # forecasting
         else:
+            rotary_cos_sin_context = None
             rotary_cos_sin = self.rotary_emb(x)
-            self.mask = generate_block_mask_sample(
+            self.mask = generate_block_mask_encoder(
                 b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
-                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size, n=seq_len-self.model_length).to(x.device) if is_mask else None# [seq_len, seq_len]
-            cond_x0 = torch.zeros(cond.shape[0], seq_len-self.model_length, cond.shape[2]).to(x.device)
-            cond = torch.cat((cond_x0, cond), dim=1)
+                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size).to(x.device) if is_mask else None# [seq_len, seq_len]
+            # cond_x0 = torch.zeros(cond.shape[0], seq_len-self.block_size, cond.shape[2]).to(x.device)
+            if seq_len > self.block_size:
+                cond = torch.cat((cond, cond), dim=1)
         
         for layer in self.layers:
-            x = layer(x, cond, rotary_cos_sin, mask=self.mask, sample=sample)
+            x = layer(x, cond, model_length, rotary_cos_sin_context=rotary_cos_sin_context, rotary_cos_sin=rotary_cos_sin, mask=self.mask, sample=sample)
         
         x = self.final_layer(x, cond)
-        x = x[:, -self.model_length:]
+        x = x[:, -model_length:]
         return x
 
 

@@ -23,15 +23,16 @@ for pred_len in 96; do
         --patch_len 2 \
         --stride 2 \
         --generate_len 48 \
-        --overlap_ratio 0.05 \
+        --overlap_ratio 1 \
+        --model_length 48 \
         --dropout 0.1 \
         --head_dropout 0.1 \
         --batch_size 16 \
         --gpu 3 \
         --lr_decay 0.5 \
         --lradj decay \
-        --time_steps 50 \
-        --sample_steps 50 \
+        --time_steps 20 \
+        --sample_steps 20 \
         --scheduler cosine \
         --patience 3 \
         --learning_rate 0.0008 \
