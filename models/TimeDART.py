@@ -193,9 +193,14 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
             ).detach()
             x = x / stdevs_x
-            
-            y = y - means_x
-            y = y / stdevs_x
+            means_y = torch.mean(y, dim=1, keepdim=True).detach() 
+            y = y - means_y
+            stdevs_y = torch.sqrt(
+                torch.var(y, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()  
+            y = y / stdevs_y
+            #y = y - means_x
+            #y = y / stdevs_x
 
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
@@ -242,9 +247,14 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
             ).detach()
             x = x / stdevs_x
-            
-            y = y - means_x
-            y = y / stdevs_x
+            means_y = torch.mean(y, dim=1, keepdim=True).detach() 
+            y = y - means_y
+            stdevs_y = torch.sqrt(
+                torch.var(y, dim=1, keepdim=True, unbiased=False) + 1e-5
+            ).detach()  
+            y = y / stdevs_y
+            #y = y - means_x
+            #y = y / stdevs_x
 
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
