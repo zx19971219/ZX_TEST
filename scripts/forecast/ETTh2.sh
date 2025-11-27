@@ -11,7 +11,7 @@ for pred_len in 96; do
         --input_len 336 \
         --label_len 48 \
         --pred_len $pred_len \
-        --e_layers 4 \
+        --e_layers 2 \
         --d_layers 2 \
         --enc_in 7 \
         --dec_in 7 \
@@ -22,17 +22,16 @@ for pred_len in 96; do
         --d_ff 256 \
         --patch_len 2 \
         --stride 2 \
-        --generate_len 48 \
-        --overlap_ratio 1 \
-        --model_length 48 \
+        --generate_len 96 \
+        --overlap_ratio 0.1 \
         --dropout 0.1 \
         --head_dropout 0.1 \
         --batch_size 16 \
-        --gpu 3 \
+        --gpu 1 \
         --lr_decay 0.5 \
         --lradj decay \
-        --time_steps 20 \
-        --sample_steps 20 \
+        --time_steps 50 \
+        --sample_steps 50 \
         --scheduler cosine \
         --patience 3 \
         --learning_rate 0.0008 \

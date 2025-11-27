@@ -288,16 +288,16 @@ if args.task_name == "pretrain":
         )
         exp.pretrain()
         
-        # args.load_checkpoints = os.path.join(
-        #     args.pretrain_checkpoints, args.data, args.transfer_checkpoints
-        # )
-        # args.task_name = "pretrain_stage2"
-        # args.train_epochs = args.train_epochs_stage2
-        # exp = Exp(args)  # set experiments
-        # print(
-        #     ">>>>>>>start pre_training stage2: {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
-        # )
-        # exp.pretrain()
+        args.load_checkpoints = os.path.join(
+            args.pretrain_checkpoints, args.data, args.transfer_checkpoints
+        )
+        args.task_name = "pretrain_stage2"
+        args.train_epochs = args.train_epochs_stage2
+        exp = Exp(args)  # set experiments
+        print(
+            ">>>>>>>start pre_training stage2: {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting)
+        )
+        exp.pretrain()
         torch.cuda.empty_cache()
 
 elif args.task_name == "forecast":

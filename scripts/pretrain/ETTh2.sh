@@ -7,7 +7,7 @@ python -u run.py \
     --data ETTh2 \
     --features M \
     --input_len 336 \
-    --e_layers 4 \
+    --e_layers 2 \
     --d_layers 2 \
     --enc_in 7 \
     --dec_in 7 \
@@ -20,15 +20,14 @@ python -u run.py \
     --stride 2 \
     --head_dropout 0.1 \
     --dropout 0.2 \
-    --overlap_ratio 1 \
-    --model_length 96 \
-    --block_num 2 \
-    --generate_len 48 \
-    --time_steps 20 \
+    --overlap_ratio 0.1 \
+    --block_num 1 \
+    --generate_len 96 \
+    --time_steps 50 \
     --scheduler cosine \
     --lr_decay 0.95 \
     --learning_rate 0.0005 \
     --batch_size 32 \
     --train_epochs 10 \
     --train_epochs_stage2 10 \
-    --gpu 3
+    --gpu 1

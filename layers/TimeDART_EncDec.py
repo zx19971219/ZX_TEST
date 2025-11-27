@@ -434,8 +434,8 @@ class TransformerDecoderBlock(nn.Module):
         x_skip = x
         x, gate1 = self.adaln1(x, cond)
         if not sample:
-            qkv_x0 = self.get_qkv(x[:, :model_length], rotary_cos_sin_context)
-            qkv_xt = self.get_qkv(x[:, model_length:], rotary_cos_sin)
+            qkv_x0 = self.get_qkv(x[:, :-model_length], rotary_cos_sin_context)
+            qkv_xt = self.get_qkv(x[:, -model_length:], rotary_cos_sin)
             qkv = torch.cat((qkv_x0, qkv_xt), dim=1)
         else: 
             qkv = self.get_qkv(x, rotary_cos_sin)
@@ -509,20 +509,22 @@ class DenoisingPatchDecoder(nn.Module):
                 b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
                 kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size, n=seq_len - model_length).to(x.device) if is_mask else None# [2*seq_len, 2*seq_len]
             
-            cond_x0 = torch.zeros(x.shape[0], seq_len-model_length, self.cond_dim).to(x.device)
-            cond = torch.cat((cond_x0, cond), dim=1)
+            cond_x0 = torch.zeros(cond.shape[0], seq_len - model_length, dtype=torch.long, device=x.device)
+            cond_x0 = F.silu(self.t_map(cond_x0))
+            cond = torch.cat([cond_x0, cond], dim=1)
             
         # forecasting
         else:
             rotary_cos_sin_context = None
             rotary_cos_sin = self.rotary_emb(x)
-            self.mask = generate_block_mask_encoder(
+            self.mask = generate_block_mask_sample(
                 b=None, h=None, q_idx=torch.arange(seq_len)[:, None], 
-                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size).to(x.device) if is_mask else None# [seq_len, seq_len]
-            # cond_x0 = torch.zeros(cond.shape[0], seq_len-self.block_size, cond.shape[2]).to(x.device)
-            if seq_len > self.block_size:
-                cond = torch.cat((cond, cond), dim=1)
-        
+                kv_idx=torch.arange(seq_len)[None, :], block_size=self.block_size, n=seq_len-self.block_size).to(x.device) if is_mask else None# [seq_len, seq_len]
+            
+            cond_x0 = torch.zeros(cond.shape[0], seq_len - self.block_size, dtype=torch.long, device=x.device)
+            cond_x0 = F.silu(self.t_map(cond_x0))
+            cond = torch.cat([cond_x0, cond], dim=1)
+            
         for layer in self.layers:
             x = layer(x, cond, model_length, rotary_cos_sin_context=rotary_cos_sin_context, rotary_cos_sin=rotary_cos_sin, mask=self.mask, sample=sample)
         

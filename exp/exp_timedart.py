@@ -210,9 +210,9 @@ class Exp_TimeDART(Exp_Basic):
                 pred_y = self.model(batch_x, batch_y)
                 diff_loss = model_criterion(pred_y, batch_y)
             else:
-                pred_y = self.model(batch_x)
+                pred_y, align_loss = self.model(batch_x, batch_y)
                 diff_loss = model_criterion(pred_y, batch_y)
-                # diff_loss = diff_loss + align_loss
+                diff_loss = diff_loss + align_loss
             diff_loss.backward()
             self.update_ema(self.ema_model, self.model)
 
@@ -240,9 +240,9 @@ class Exp_TimeDART(Exp_Basic):
                     pred_y = self.ema_model(batch_x, batch_y)
                     diff_loss = model_criterion(pred_y, batch_y)
                 else:
-                    pred_y = self.ema_model(batch_x)
+                    pred_y, align_loss = self.ema_model(batch_x, batch_y)
                     diff_loss = model_criterion(pred_y, batch_y)
-                    # diff_loss = diff_loss + align_loss
+                    diff_loss = diff_loss + align_loss
                 vali_loss.append(diff_loss.item())
 
         vali_loss = np.mean(vali_loss)
